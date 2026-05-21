@@ -69,10 +69,10 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       is_valid: ${{ steps.get_validity.outputs.is_valid }}
-      
+
     steps:
       - uses: actions/checkout@v6
-      
+
       - name: Validate Fiddler Version
         id: get_validity
         working-directory: utils/fe-version-validator
@@ -82,15 +82,15 @@ jobs:
   init_os_arch:
     runs-on: ubuntu-latest
     outputs:
-      library_extension:  ${{ steps.set_library_extension.outputs.library_extension }}
-      arch_code:  ${{ steps.set_arch.outputs.arch_code }}
-      
+      library_extension: ${{ steps.set_library_extension.outputs.library_extension }}
+      arch_code: ${{ steps.set_arch.outputs.arch_code }}
+
     steps:
       - name: Set Library Extension (dll / so / dylib)
         id: set_library_extension
         run: |
           $extension = 'not-selected'
-    
+
           if ($env:OS_ARCH -eq 'Windows (x86_64)') {
             $extension = 'dll'
           } elseif ($env:OS_ARCH -eq 'Linux (x86_64)') {
@@ -100,14 +100,14 @@ jobs:
           } else {
             throw "Unsupported OS architecture: $env:OS_ARCH"
           }
-          
+
           "library_extension=$extension" | Out-File -Append -FilePath $env:GITHUB_OUTPUT
 
-      - name: Set Library Extension (dll / so / dylib)
+      - name: Set Arch Code
         id: set_arch
         run: |
           $arch = 'not-selected'
-    
+
           if ($env:OS_ARCH -eq 'Windows (x86_64)') {
             $arch = 'win32-x86_64'
           } elseif ($env:OS_ARCH -eq 'Linux (x86_64)') {
@@ -121,21 +121,20 @@ jobs:
           } else {
             throw "Unsupported OS architecture: $env:OS_ARCH"
           }
-          
+
           "arch_code=$arch" | Out-File -Append -FilePath $env:GITHUB_OUTPUT
-   
+
   download-Yui-patch:
     runs-on: ubuntu-latest
-    needs: 
+    needs:
       - validate-version
       - init_os_arch
-
     if: ${{ needs.validate-version.outputs.is_valid == 'true' }}
 
-    env: 
+    env:
       LIBRARY_EXTENSION: ${{ needs.init_os_arch.outputs.library_extension }}
       ARCH_CODE: ${{ needs.init_os_arch.outputs.arch_code }}
-      
+
     outputs:
       is-compatible-cont: ${{ steps.is-compatible-cont.outputs.is-compatible-cont }}
       Yui-fiddler-name: ${{ steps.Yui-fiddler-name.outputs.Yui-fiddler-name }}
@@ -146,7 +145,7 @@ jobs:
         run: |
           $patchingVersion = $env:VERSION_TO_PATCH
           $compareVersion = "5.17.0"
-   
+
           if (-not [string]::IsNullOrEmpty($patchingVersion)) {
               if ([version]$patchingVersion -ge [version]$compareVersion) {
                   echo "IS_COMPATIBLE_CONT=true" | Out-File -Append -FilePath $env:GITHUB_ENV
@@ -156,14 +155,14 @@ jobs:
           } else {
               echo "IS_COMPATIBLE_CONT=false" | Out-File -Append -FilePath $env:GITHUB_ENV
           }
-        
+
       - name: Set IS_COMPATIBLE_CONT as Output
         id: is-compatible-cont
         run: echo "is-compatible-cont=${{ env.IS_COMPATIBLE_CONT }}" >> $env:GITHUB_OUTPUT
 
-      - name: Set Yui name 
+      - name: Set Yui name
         run: echo "YUI_NAME=yui" >> $env:GITHUB_ENV
-        
+
       - name: Set Yui fiddler name (>= 5.17.0)
         if: env.IS_COMPATIBLE_CONT == 'true'
         run: |
@@ -187,28 +186,23 @@ jobs:
           }
 
       - name: Set Yui Release
-        run: echo "Yui_RELEASE=continuous" >> $env:GITHUB_ENV   
-        
+        run: echo "Yui_RELEASE=continuous" >> $env:GITHUB_ENV
+
       - name: Download Yui Patch
         run: |
           Write-Host "EXTENSION = $env:LIBRARY_EXTENSION"
-          Write-Host "ARCH CODE =  $env:ARCH_CODE"
+          Write-Host "ARCH CODE = $env:ARCH_CODE"
           try {
-            # Build the download URLs
             $YuiFiddlerUrl = "https://github.com/project-yui/Yui-patch/releases/download/$env:Yui_RELEASE/$env:YUI_NAME-$env:Yui_FIDDLER_NAME_NO_EXTENSION-$env:ARCH_CODE-$env:Yui_RELEASE.$env:LIBRARY_EXTENSION"
-            
-            # Print the URLs to ensure they're correct
             Write-Host "Downloading files from $env:Yui_RELEASE"
             Write-Host "Yui Fiddler URL: $YuiFiddlerUrl"
-
-            # Download the files
-            Invoke-WebRequest -Uri $YuiFiddlerUrl -OutFile "Yui\$env:Yui_FIDDLER_NAME"
+            Invoke-WebRequest -Uri $YuiFiddlerUrl -OutFile "Yui\$env:Yui_FIDDLER_NAME" -UseBasicParsing
           }
           catch {
             Write-Error "Failed to download the patch files. Error details: $_"
             exit 1
           }
-      
+
       - name: Upload Yui folder as an artifact
         uses: actions/upload-artifact@v7
         with:
@@ -219,7 +213,6 @@ jobs:
   download-msojocs-server:
     runs-on: ubuntu-latest
     needs: validate-version
-    
     if: ${{ needs.validate-version.outputs.is_valid == 'true' }}
 
     steps:
@@ -236,7 +229,7 @@ jobs:
 
       - name: Move the downloaded directory to the target folder
         run: |
-          mkdir -p msojocs
+          New-Item -ItemType Directory -Path "msojocs" -Force
           Move-Item -Path "server" -Destination "msojocs/"
 
       - name: List files in the msojocs/server directory
@@ -250,36 +243,30 @@ jobs:
           if-no-files-found: error
 
   download-fiddler-everywhere-windows:
-    if: ${{ github.event.inputs.os-and-arch == 'Windows (x86_64)' }}
+    if: |
+      needs.validate-version.outputs.is_valid == 'true' &&
+      github.event.inputs.os-and-arch == 'Windows (x86_64)'
     runs-on: ubuntu-latest
-    needs: 
+    needs:
       - validate-version
 
     steps:
       - name: Build URL & Download
         run: |
-          # Retrieve the patchingVersion version from the previous step
           $patchingVersion = $env:VERSION_TO_PATCH
-          
-          # Check if the patchingVersion version is available
-          if (-not [string]::IsNullOrEmpty($patchingVersion)) {
-            $downloadUrl = "https://downloads.getfiddler.com/win/Fiddler%20Everywhere%20$patchingVersion.exe"
-          
-            Write-Host "Download URL: $downloadUrl"
+          if ([string]::IsNullOrEmpty($patchingVersion)) { exit 1 }
 
-            Invoke-WebRequest -Uri $downloadUrl -OutFile "FiddlerEverywhereSetup.exe"
-            
-          } else {
-            Write-Host "PATCHING_VERSION is empty or not set"
-            exit 1
-          }
+          $downloadUrl = "https://downloads.getfiddler.com/win/Fiddler%20Everywhere%20$patchingVersion.exe"
+          Write-Host "Download URL: $downloadUrl"
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-WebRequest -Uri $downloadUrl -OutFile "FiddlerEverywhereSetup.exe" -UseBasicParsing
 
-      - name: Extract exe 
+      - name: Extract exe
         run: 7z x "FiddlerEverywhereSetup.exe" -ofe_extracted
 
       - name: Extract app
         run: 7z x "fe_extracted/`$PLUGINSDIR/app-64.7z" -ofe_app
-        
+
       - name: Upload Fiddler Everywhere Extracted folder as an artifact
         uses: actions/upload-artifact@v7
         with:
@@ -288,38 +275,32 @@ jobs:
           if-no-files-found: error
 
   download-fiddler-everywhere-linux:
-    if: ${{ github.event.inputs.os-and-arch == 'Linux (x86_64)' }}
+    if: |
+      needs.validate-version.outputs.is_valid == 'true' &&
+      github.event.inputs.os-and-arch == 'Linux (x86_64)'
     runs-on: ubuntu-latest
-    needs: 
+    needs:
       - validate-version
 
     steps:
       - name: Build URL & Download
         run: |
-          # Retrieve the version to patch from the previous step
           $patchingVersion = $env:VERSION_TO_PATCH
-          
-          # Check if the patchingVersion version is available
-          if (-not [string]::IsNullOrEmpty($patchingVersion)) {
-            $downloadUrl = "https://downloads.getfiddler.com/linux/fiddler-everywhere-$patchingVersion.AppImage"
-          
-            Write-Host "Download URL: $downloadUrl"
+          if ([string]::IsNullOrEmpty($patchingVersion)) { exit 1 }
 
-            Invoke-WebRequest -Uri $downloadUrl -OutFile "FiddlerEverywhereSetup.AppImage"
-            
-          } else {
-            Write-Host "VERSION_TO_PATCH is empty or not set"
-            exit 1
-          }
+          $downloadUrl = "https://downloads.getfiddler.com/linux/fiddler-everywhere-$patchingVersion.AppImage"
+          Write-Host "Download URL: $downloadUrl"
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-WebRequest -Uri $downloadUrl -OutFile "FiddlerEverywhereSetup.AppImage" -UseBasicParsing
 
-      - name: Extract AppImage 
+      - name: Extract AppImage
         run: |
           chmod +x ./FiddlerEverywhereSetup.AppImage
           ./FiddlerEverywhereSetup.AppImage --appimage-extract
 
       - name: Rename squashfs-root to fe_app
         run: mv squashfs-root fe_app
-        
+
       - name: Upload Fiddler Everywhere Extracted folder as an artifact
         uses: actions/upload-artifact@v7
         with:
@@ -328,51 +309,101 @@ jobs:
           if-no-files-found: error
 
   download-fiddler-everywhere-mac:
-    if: ${{ github.event.inputs.os-and-arch == 'Mac (x86_64)' || github.event.inputs.os-and-arch == 'Mac (arm64)' || github.event.inputs.os-and-arch == 'Mac (arm64e)' }}
-    runs-on: mac-latest
-    needs: 
+    if: |
+      needs.validate-version.outputs.is_valid == 'true' &&
+      (github.event.inputs.os-and-arch == 'Mac (x86_64)' ||
+       github.event.inputs.os-and-arch == 'Mac (arm64)' ||
+       github.event.inputs.os-and-arch == 'Mac (arm64e)')
+    runs-on: macos-latest
+    needs:
       - validate-version
-
-    env: 
-      ARCH_CODE: ${{ github.event.inputs.arch_code }}
 
     steps:
       - name: Build URL & Download
         run: |
-          # Retrieve the version_to_patch version from the previous step
           $patchingVersion = $env:VERSION_TO_PATCH
-          
-          # Check if the version_to_patch version is available
-          if (-not [string]::IsNullOrEmpty($patchingVersion)) {
-            $downloadUrl = "null"
+          if ([string]::IsNullOrEmpty($patchingVersion)) { exit 1 }
 
-            if ($env:ARCH_CODE -eq "x86_64") {
-              $downloadUrl = "https://downloads.getfiddler.com/mac/Fiddler%20Everywhere%20$patchingVersion.dmg"
-            } elseif ($env:ARCH_CODE -eq "arm64") {
-              $downloadUrl = "https://downloads.getfiddler.com/mac-arm64/Fiddler%20Everywhere%20$patchingVersion.dmg"
-            } elseif ($env:ARCH_CODE -eq "arm64e") {
-              //Don't know
-            } else {
-              throw "Unsupported OS architecture: $env:ARCH_CODE"
-            }
-          
-            Write-Host "Download URL: $downloadUrl"
-
-            Invoke-WebRequest -Uri $downloadUrl -OutFile "FiddlerEverywhereSetup.dmg"
-            
-          } else {
-            Write-Host "VERSION_TO_PATCH is empty or not set"
-            exit 1
+          $downloadUrl = switch ($env:OS_ARCH) {
+            'Mac (x86_64)' { "https://downloads.getfiddler.com/mac/Fiddler%20Everywhere%20$patchingVersion.dmg" }
+            'Mac (arm64)'  { "https://downloads.getfiddler.com/mac-arm64/Fiddler%20Everywhere%20$patchingVersion.dmg" }
+            'Mac (arm64e)' { throw "Mac (arm64e) download URL is not configured yet." }
+            default { throw "Unsupported OS architecture: $env:OS_ARCH" }
           }
 
-      - name: Extract AppImage 
+          Write-Host "Download URL: $downloadUrl"
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-WebRequest -Uri $downloadUrl -OutFile "FiddlerEverywhereSetup.dmg" -UseBasicParsing
+
+          $size = (Get-Item "FiddlerEverywhereSetup.dmg").Length
+          Write-Host "Downloaded size: $size bytes"
+          if ($size -lt 1000000) {
+            throw "DMG too small ($size bytes) — likely not a real installer (check version or URL)."
+          }
+
+      - name: Extract Dmg
+        shell: bash
         run: |
-          hdiutil attach FiddlerEverywhere.dmg
-          cp -R /Volumes/FiddlerEverywhere/* ./fe_app/
+          set -euo pipefail
+          DMG="FiddlerEverywhereSetup.dmg"
+
+          echo "=== file type ==="
+          file "$DMG"
+          ls -lh "$DMG"
+
+          xattr -dr com.apple.quarantine "$DMG" 2>/dev/null || true
+
+          mkdir -p fe_app
+          MOUNT_DIR="/tmp/fe-dmg-mount-$$"
+          mkdir -p "$MOUNT_DIR"
+
+          extract_via_hdiutil() {
+            hdiutil attach -plist -nobrowse -noverify -noautofsck -noautoopen -mountpoint "$MOUNT_DIR" "$DMG"
+            if ! ls "$MOUNT_DIR"/*.app 1>/dev/null 2>&1; then
+              echo "No .app under mountpoint"
+              hdiutil detach "$MOUNT_DIR" -force 2>/dev/null || true
+              return 1
+            fi
+            cp -R "$MOUNT_DIR"/*.app fe_app/
+            hdiutil detach "$MOUNT_DIR" -force
+          }
+
+          extract_via_7z() {
+            echo "=== fallback: 7z ==="
+            rm -rf /tmp/fe-dmg-extract
+            7z x "$DMG" -o/tmp/fe-dmg-extract
+            APP=$(find /tmp/fe-dmg-extract -name "*.app" -type d | head -1)
+            if [ -z "$APP" ]; then
+              echo "7z: no .app found"
+              find /tmp/fe-dmg-extract | head -50
+              return 1
+            fi
+            cp -R "$APP" fe_app/
+          }
+
+          if extract_via_hdiutil; then
+            echo "Extracted via hdiutil"
+          elif extract_via_7z; then
+            echo "Extracted via 7z"
+          else
+            echo "Both hdiutil and 7z failed"
+            exit 1
+          fi
+
+          echo "=== fe_app contents ==="
+          ls -la fe_app/
+
+      - name: Debug DMG on failure
+        if: failure()
+        shell: bash
+        run: |
+          file FiddlerEverywhereSetup.dmg 2>/dev/null || true
+          ls -lh FiddlerEverywhereSetup.dmg 2>/dev/null || true
+          xxd FiddlerEverywhereSetup.dmg 2>/dev/null | head -3 || true
 
       - name: List fe_app
-        run: Get-ChildItem -Recurse
-        
+        run: Get-ChildItem -Recurse fe_app
+
       - name: Upload Fiddler Everywhere Extracted folder as an artifact
         uses: actions/upload-artifact@v7
         with:
@@ -381,8 +412,13 @@ jobs:
           if-no-files-found: error
 
   patch_fe:
+    if: |
+      always() &&
+      !cancelled() &&
+      needs.validate-version.outputs.is_valid == 'true' &&
+      (github.event.inputs.os-and-arch == 'Windows (x86_64)' ||
+       github.event.inputs.os-and-arch == 'Linux (x86_64)')
     runs-on: windows-latest
-
     needs:
       - download-Yui-patch
       - download-msojocs-server
@@ -390,11 +426,10 @@ jobs:
       - download-fiddler-everywhere-windows
       - download-fiddler-everywhere-linux
       - download-fiddler-everywhere-mac
-    if: always()
 
     outputs:
       patched-fe-name: ${{ steps.rename-fe.outputs.patched-fe-name }}
-      
+
     steps:
       - name: Download Yukuhana-Patch
         uses: actions/download-artifact@v8
@@ -423,35 +458,41 @@ jobs:
       - name: Rename main FE folder
         run: Rename-Item -Path "fe_app" -NewName "FE"
 
-      - name: Patch fiddler.dll / libfiddler.dll
+      - name: Patch fiddler.dll / libfiddler.dll / libfiddler.so
         run: |
-          $original_fiddler = "FE/${{ needs.download-Yui-patch.outputs.Yui-fiddler-name }}"
-          $Yui_fiddler = "Yui-patch/${{ needs.download-Yui-patch.outputs.Yui-fiddler-name }}"
-          
+          $fiddlerName = "${{ needs.download-Yui-patch.outputs.Yui-fiddler-name }}"
+          $original_fiddler = "FE/$fiddlerName"
+          $Yui_fiddler = "Yui-patch/$fiddlerName"
+
           if ((Test-Path $original_fiddler) -and (Test-Path $Yui_fiddler)) {
             Copy-Item -Path $Yui_fiddler -Destination $original_fiddler -Force
             Write-Host "Replaced $original_fiddler with $Yui_fiddler"
           } else {
-            Write-Host "fiddler / libfiddler or Yui patch not found"
+            $found = Get-ChildItem -Path FE -Recurse -Filter $fiddlerName -File -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found -and (Test-Path $Yui_fiddler)) {
+              Copy-Item -Path $Yui_fiddler -Destination $found.FullName -Force
+              Write-Host "Replaced $($found.FullName) with $Yui_fiddler"
+            } else {
+              Write-Error "fiddler patch not found for $fiddlerName"
+              exit 1
+            }
           }
 
       - name: Clean Yui-patch
         run: |
           if (Test-Path Yui-patch) {
             Remove-Item -Path "Yui-patch" -Recurse
-          } else {
-            Write-Host "Yui-patch Folder not found"
           }
 
       - name: Copy Server Folder
         run: |
           $source_server_folder = "msojocs-patch/server/file"
           $destination_server_folder = "FE/resources/app/out"
-
           if (Test-Path $source_server_folder) {
             Copy-Item -Path $source_server_folder -Destination $destination_server_folder -Recurse
           } else {
-            Write-Host "Source Server Folder not found"
+            Write-Error "Source Server Folder not found"
+            exit 1
           }
 
       - name: Enable Chinese translation
@@ -459,79 +500,253 @@ jobs:
         run: |
           $translate_js = "msojocs-patch/server/translate.js"
           $dest_translate = "FE/resources/app/out/translate.js"
-
           if (Test-Path $translate_js) {
             Copy-Item -Path $translate_js -Destination $dest_translate -Force
-            Write-Host "translate.js copied, Chinese language enabled (Ctrl+T to switch)"
+            Write-Host "translate.js copied"
           } else {
-            Write-Host "translate.js not found in server directory"
+            Write-Host "translate.js not found"
           }
 
-      - name: Set patch server port (in main.js of server)
+      - name: Set patch server port (in index.js of server)
         run: |
           $source_index = "msojocs-patch/server/index.js"
-          $index_content = Get-Content -Path $source_index -Raw
-
           if (Test-Path $source_index) {
+            $index_content = Get-Content -Path $source_index -Raw
             $index_content = $index_content -replace 'const port = \d+;', "const port = $env:PATCH_SERVER_PORT;"
             Set-Content -Path $source_index -Value $index_content
             Write-Host "Server port set to $env:PATCH_SERVER_PORT"
           } else {
-            Write-Host "index.js (from server) not found"
+            Write-Error "index.js (from server) not found"
+            exit 1
           }
 
       - name: Set user credentials
         run: |
           $source_json = "FE/resources/app/out/file/identity.getfiddler.com/oauth/token.json"
           $main_content = Get-Content -Path $source_json -Raw | ConvertFrom-Json
-
           $main_content.user_info.email = $env:PATCH_USER_EMAIL
           $main_content.user_info.firstName = $env:PATCH_USER_FNAME
           $main_content.user_info.lastName = $env:PATCH_USER_LNAME
           $main_content.user_info.country = $env:PATCH_USER_COUNTRYCODE
           $main_content.user_info.identities[0].providerName = $env:PATCH_USER_PROVIDER
-
           $main_content | ConvertTo-Json -Depth 5 | Set-Content -Path $source_json
 
       - name: Patch main.js to main.original.js
         run: |
           $source_main = "FE/resources/app/out/main.js"
-          $main_content = Get-Content -Path $source_main -Raw
-
           $new_main = "FE/resources/app/out/main.original.js"
-
           $source_index = "msojocs-patch/server/index.js"
-          $index_content = Get-Content -Path $source_index -Raw
-          
           if ((Test-Path $source_main) -and (Test-Path $source_index)) {
+            $main_content = Get-Content -Path $source_main -Raw
+            $index_content = Get-Content -Path $source_index -Raw
             Copy-Item -Path $source_main -Destination $new_main
-
-            $appended_content = $index_content + $main_content
-
-            Set-Content -Path $source_main -Value $appended_content
+            Set-Content -Path $source_main -Value ($index_content + $main_content)
           } else {
-            Write-Host "Source main.js or index.js (from server) not found"
+            Write-Error "Source main.js or index.js not found"
+            exit 1
           }
 
       - name: Clean msojocs-patch
         run: |
           if (Test-Path msojocs-patch) {
             Remove-Item -Path "msojocs-patch" -Recurse
-          } else {
-            Write-Host "msojocs-patch Folder not found"
           }
 
-      - name: Rename FE 
+      - name: Rename FE
         id: rename-fe
         run: |
           if (Test-Path FE) {
             $newName = "Fiddler-Everywhere-V$env:VERSION_TO_PATCH-Patched"
-            
             Rename-Item -Path "FE" -NewName $newName
-            
-            echo "patched-fe-name=$newName" | Out-File -Append -FilePath $env:GITHUB_OUTPUT
+            "patched-fe-name=$newName" | Out-File -Append -FilePath $env:GITHUB_OUTPUT
           } else {
-            Write-Host "FE Folder not found!?"
+            Write-Error "FE Folder not found"
+            exit 1
+          }
+
+      - name: Upload Artifact for Patched FE
+        uses: actions/upload-artifact@v7
+        with:
+          name: "${{ steps.rename-fe.outputs.patched-fe-name }}"
+          path: "${{ steps.rename-fe.outputs.patched-fe-name }}/"
+          if-no-files-found: error
+
+  patch_fe_mac:
+    if: |
+      always() &&
+      !cancelled() &&
+      needs.validate-version.outputs.is_valid == 'true' &&
+      (github.event.inputs.os-and-arch == 'Mac (x86_64)' ||
+       github.event.inputs.os-and-arch == 'Mac (arm64)' ||
+       github.event.inputs.os-and-arch == 'Mac (arm64e)')
+    runs-on: macos-latest
+    needs:
+      - download-Yui-patch
+      - download-msojocs-server
+      - validate-version
+      - download-fiddler-everywhere-windows
+      - download-fiddler-everywhere-linux
+      - download-fiddler-everywhere-mac
+
+    outputs:
+      patched-fe-name: ${{ steps.rename-fe.outputs.patched-fe-name }}
+
+    steps:
+      - name: Download Yukuhana-Patch
+        uses: actions/download-artifact@v8
+        with:
+          name: Yui-patch
+          path: Yui-patch
+
+      - name: Download msojocs-Server
+        uses: actions/download-artifact@v8
+        with:
+          name: msojocs-patch
+          path: msojocs-patch
+
+      - name: Download FE
+        uses: actions/download-artifact@v8
+        with:
+          name: fe_app
+          path: fe_app
+
+      - name: List the contents of the downloaded artifacts
+        run: |
+          Get-ChildItem -Recurse Yui-patch
+          Get-ChildItem -Recurse msojocs-patch
+          Get-ChildItem -Recurse fe_app
+
+      - name: Rename main FE folder
+        run: Rename-Item -Path "fe_app" -NewName "FE"
+
+      - name: Resolve Mac app paths
+        id: mac_paths
+        run: |
+          $appBundle = Get-ChildItem -Path FE -Filter "*.app" -Directory -Recurse | Select-Object -First 1
+          if (-not $appBundle) {
+            Write-Error "No .app bundle found under FE"
+            exit 1
+          }
+
+          $resourcesApp = Join-Path $appBundle.FullName "Contents/Resources/app"
+          if (-not (Test-Path $resourcesApp)) {
+            Write-Error "Contents/Resources/app not found in $($appBundle.FullName)"
+            exit 1
+          }
+
+          $outDir = Join-Path $resourcesApp "out"
+          if (-not (Test-Path $outDir)) {
+            Write-Error "Contents/Resources/app/out not found — app may be packed in app.asar"
+            exit 1
+          }
+
+          "app_bundle=$($appBundle.FullName)" | Out-File -Append -FilePath $env:GITHUB_OUTPUT
+          "out_dir=$outDir" | Out-File -Append -FilePath $env:GITHUB_OUTPUT
+          Write-Host "App bundle: $($appBundle.FullName)"
+          Write-Host "Out dir: $outDir"
+
+      - name: Patch fiddler.dylib
+        run: |
+          $fiddlerName = "${{ needs.download-Yui-patch.outputs.Yui-fiddler-name }}"
+          $Yui_fiddler = Join-Path "Yui-patch" $fiddlerName
+          $target = Get-ChildItem -Path FE -Recurse -Filter $fiddlerName -File -ErrorAction SilentlyContinue | Select-Object -First 1
+
+          if (-not $target) {
+            Write-Error "Target $fiddlerName not found in app bundle"
+            exit 1
+          }
+          if (-not (Test-Path $Yui_fiddler)) {
+            Write-Error "Yui patch not found: $Yui_fiddler"
+            exit 1
+          }
+
+          Copy-Item -Path $Yui_fiddler -Destination $target.FullName -Force
+          Write-Host "Replaced $($target.FullName) with $Yui_fiddler"
+
+      - name: Clean Yui-patch
+        run: |
+          if (Test-Path Yui-patch) {
+            Remove-Item -Path "Yui-patch" -Recurse
+          }
+
+      - name: Copy Server Folder
+        run: |
+          $source_server_folder = "msojocs-patch/server/file"
+          $destination_server_folder = "${{ steps.mac_paths.outputs.out_dir }}"
+          if (Test-Path $source_server_folder) {
+            Copy-Item -Path $source_server_folder -Destination $destination_server_folder -Recurse
+          } else {
+            Write-Error "Source Server Folder not found"
+            exit 1
+          }
+
+      - name: Enable Chinese translation
+        if: startsWith(env.PATCH_LANGUAGE, 'Yes')
+        run: |
+          $translate_js = "msojocs-patch/server/translate.js"
+          $dest_translate = "${{ steps.mac_paths.outputs.out_dir }}/translate.js"
+          if (Test-Path $translate_js) {
+            Copy-Item -Path $translate_js -Destination $dest_translate -Force
+            Write-Host "translate.js copied"
+          } else {
+            Write-Host "translate.js not found"
+          }
+
+      - name: Set patch server port (in index.js of server)
+        run: |
+          $source_index = "msojocs-patch/server/index.js"
+          if (Test-Path $source_index) {
+            $index_content = Get-Content -Path $source_index -Raw
+            $index_content = $index_content -replace 'const port = \d+;', "const port = $env:PATCH_SERVER_PORT;"
+            Set-Content -Path $source_index -Value $index_content
+            Write-Host "Server port set to $env:PATCH_SERVER_PORT"
+          } else {
+            Write-Error "index.js (from server) not found"
+            exit 1
+          }
+
+      - name: Set user credentials
+        run: |
+          $source_json = "${{ steps.mac_paths.outputs.out_dir }}/file/identity.getfiddler.com/oauth/token.json"
+          $main_content = Get-Content -Path $source_json -Raw | ConvertFrom-Json
+          $main_content.user_info.email = $env:PATCH_USER_EMAIL
+          $main_content.user_info.firstName = $env:PATCH_USER_FNAME
+          $main_content.user_info.lastName = $env:PATCH_USER_LNAME
+          $main_content.user_info.country = $env:PATCH_USER_COUNTRYCODE
+          $main_content.user_info.identities[0].providerName = $env:PATCH_USER_PROVIDER
+          $main_content | ConvertTo-Json -Depth 5 | Set-Content -Path $source_json
+
+      - name: Patch main.js to main.original.js
+        run: |
+          $source_main = "${{ steps.mac_paths.outputs.out_dir }}/main.js"
+          $new_main = "${{ steps.mac_paths.outputs.out_dir }}/main.original.js"
+          $source_index = "msojocs-patch/server/index.js"
+          if ((Test-Path $source_main) -and (Test-Path $source_index)) {
+            $main_content = Get-Content -Path $source_main -Raw
+            $index_content = Get-Content -Path $source_index -Raw
+            Copy-Item -Path $source_main -Destination $new_main
+            Set-Content -Path $source_main -Value ($index_content + $main_content)
+          } else {
+            Write-Error "Source main.js or index.js not found"
+            exit 1
+          }
+
+      - name: Clean msojocs-patch
+        run: |
+          if (Test-Path msojocs-patch) {
+            Remove-Item -Path "msojocs-patch" -Recurse
+          }
+
+      - name: Rename FE
+        id: rename-fe
+        run: |
+          if (Test-Path FE) {
+            $newName = "Fiddler-Everywhere-V$env:VERSION_TO_PATCH-Patched-mac"
+            Rename-Item -Path "FE" -NewName $newName
+            "patched-fe-name=$newName" | Out-File -Append -FilePath $env:GITHUB_OUTPUT
+          } else {
+            Write-Error "FE Folder not found"
+            exit 1
           }
 
       - name: Upload Artifact for Patched FE
