@@ -628,40 +628,76 @@ jobs:
             exit 1
           }
 
+          $frameworksDir = Join-Path $appBundle.FullName "Contents/Frameworks"
           $resourcesApp = Join-Path $appBundle.FullName "Contents/Resources/app"
-          if (-not (Test-Path $resourcesApp)) {
-            Write-Error "Contents/Resources/app not found in $($appBundle.FullName)"
-            exit 1
+          $outDir = Join-Path $resourcesApp "out"
+
+          Write-Host "App bundle: $($appBundle.FullName)"
+          Write-Host "Frameworks: $frameworksDir"
+
+          if (Test-Path $frameworksDir) {
+            Write-Host "=== Contents/Frameworks ==="
+            Get-ChildItem -Path $frameworksDir -Recurse -File | ForEach-Object { $_.FullName }
+          } else {
+            Write-Warning "Frameworks directory missing — will create"
           }
 
-          $outDir = Join-Path $resourcesApp "out"
           if (-not (Test-Path $outDir)) {
-            Write-Error "Contents/Resources/app/out not found — app may be packed in app.asar"
+            Write-Error "Contents/Resources/app/out not found — app may use app.asar"
             exit 1
           }
 
           "app_bundle=$($appBundle.FullName)" | Out-File -Append -FilePath $env:GITHUB_OUTPUT
+          "frameworks_dir=$frameworksDir" | Out-File -Append -FilePath $env:GITHUB_OUTPUT
           "out_dir=$outDir" | Out-File -Append -FilePath $env:GITHUB_OUTPUT
-          Write-Host "App bundle: $($appBundle.FullName)"
-          Write-Host "Out dir: $outDir"
 
-      - name: Patch libfiddler.dylib
+      - name: Patch fiddler.dylib in Contents/Frameworks
         run: |
-          $fiddlerName = "${{ needs.download-Yui-patch.outputs.Yui-fiddler-name }}"
-          $Yui_fiddler = Join-Path "Yui-patch" $fiddlerName
-          $target = Get-ChildItem -Path FE -Recurse -Filter $fiddlerName -File -ErrorAction SilentlyContinue | Select-Object -First 1
+          $frameworksDir = "${{ steps.mac_paths.outputs.frameworks_dir }}"
+          $YuiName = "${{ needs.download-Yui-patch.outputs.Yui-fiddler-name }}"
+          $YuiPath = Join-Path "Yui-patch" $YuiName
 
-          if (-not $target) {
-            Write-Error "Target $fiddlerName not found in app bundle"
-            exit 1
-          }
-          if (-not (Test-Path $Yui_fiddler)) {
-            Write-Error "Yui patch not found: $Yui_fiddler"
+          if (-not (Test-Path $YuiPath)) {
+            Write-Error "Yui patch not found: $YuiPath"
             exit 1
           }
 
-          Copy-Item -Path $Yui_fiddler -Destination $target.FullName -Force
-          Write-Host "Replaced $($target.FullName) with $Yui_fiddler"
+          if (-not (Test-Path $frameworksDir)) {
+            New-Item -ItemType Directory -Path $frameworksDir -Force | Out-Null
+          }
+
+          if ([version]$env:VERSION_TO_PATCH -ge [version]"5.17.0") {
+            $destNames = @("fiddler.dylib", "libfiddler.dylib")
+          } else {
+            $destNames = @("libfiddler.dylib", "fiddler.dylib")
+          }
+
+          foreach ($name in $destNames) {
+            $existing = Join-Path $frameworksDir $name
+            if (Test-Path $existing) {
+              Remove-Item -Path $existing -Force
+              Write-Host "Removed old: $existing"
+            }
+          }
+
+          $target = Get-ChildItem -Path $frameworksDir -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -in $destNames } |
+            Select-Object -First 1
+
+          if ($target) {
+            Copy-Item -Path $YuiPath -Destination $target.FullName -Force
+            Write-Host "Replaced $($target.FullName) with $YuiPath"
+          } else {
+            $destName = $destNames[0]
+            $destPath = Join-Path $frameworksDir $destName
+            Copy-Item -Path $YuiPath -Destination $destPath -Force
+            Write-Host "No existing dylib in bundle; installed to $destPath"
+          }
+
+          Write-Host "=== Frameworks after patch ==="
+          Get-ChildItem -Path $frameworksDir -Recurse -File |
+            Where-Object { $_.Name -match 'fiddler' } |
+            ForEach-Object { "$($_.FullName) ($($_.Length) bytes)" }
 
       - name: Clean Yui-patch
         run: |
@@ -736,6 +772,11 @@ jobs:
           if (Test-Path msojocs-patch) {
             Remove-Item -Path "msojocs-patch" -Recurse
           }
+
+      - name: Re-sign app bundle
+        shell: bash
+        run: |
+          codesign -s "-" --deep --force --verbose "${{ steps.mac_paths.outputs.app_bundle }}"
 
       - name: Rename FE
         id: rename-fe
