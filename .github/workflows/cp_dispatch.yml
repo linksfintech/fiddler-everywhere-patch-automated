@@ -645,7 +645,7 @@ jobs:
           Write-Host "App bundle: $($appBundle.FullName)"
           Write-Host "Out dir: $outDir"
 
-      - name: Patch fiddler.dylib
+      - name: Patch libfiddler.dylib
         run: |
           $fiddlerName = "${{ needs.download-Yui-patch.outputs.Yui-fiddler-name }}"
           $Yui_fiddler = Join-Path "Yui-patch" $fiddlerName
