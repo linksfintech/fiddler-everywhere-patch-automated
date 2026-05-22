@@ -1,10 +1,12 @@
+# Fiddler Everywhere custom patch workflow.
+# Mac 7.7.x: see docs/fe-mac-773-patch.md (full + Yui v1.1.4).
 name: Custom Version - Workflow Dispatch
 
 on:
   workflow_dispatch:
     inputs:
       version_to_patch:
-        description: 'The Version You Want to Patch'
+        description: 'FE version (Mac 7.7.3: use full mode — see docs/fe-mac-773-patch.md)'
         required: true
         default: '7.7.3'
       os-and-arch:
@@ -47,6 +49,14 @@ on:
         options:
           - 'No'
           - 'Yes (Ctrl+T to toggle)'
+      mac-patch-mode:
+        description: 'Mac only. 7.7.x: full = v1.1.4 dylib + msojocs (999-day trial). dylib-only keeps Trial banner.'
+        required: true
+        type: choice
+        default: 'full'
+        options:
+          - 'full'
+          - 'dylib-only'
 
 defaults:
   run:
@@ -143,7 +153,12 @@ jobs:
           }
 
           "YUI_NAME=yui" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
-          "Yui_RELEASE=continuous" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+          $yuiRelease = 'continuous'
+          if ($env:OS_ARCH -match '^Mac ' -and [version]$env:VERSION_TO_PATCH -ge [version]'7.7.0') {
+            $yuiRelease = 'v1.1.4'
+          }
+          "Yui_RELEASE=$yuiRelease" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
+          Write-Host "Yui release tag: $yuiRelease"
           "Yui_FIDDLER_NAME=$yuiName" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
           "Yui_FIDDLER_NAME_NO_EXTENSION=$noExt" | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
           "Yui-fiddler-name=$yuiName" | Out-File -Append -FilePath $env:GITHUB_OUTPUT -Encoding utf8
@@ -420,13 +435,20 @@ jobs:
           if ($item.PSIsContainer) { throw "$destPath is directory" }
           Write-Host "Installed $($item.Length) bytes -> $destPath"
 
-      - name: Patch app/out
+      - name: Warn if Mac 7.7.x uses dylib-only
+        if: |
+          contains(github.event.inputs.mac-patch-mode, 'dylib-only') &&
+          github.event.inputs.version_to_patch >= '7.7.0'
+        run: |
+          Write-Warning "Mac $($env:VERSION_TO_PATCH): dylib-only launches but Trial banner remains. Use mac-patch-mode=full for trial bypass."
+
+      - name: Patch app/out (msojocs — full mode only)
+        if: contains(github.event.inputs.mac-patch-mode, 'full')
         run: |
           $out = "${{ steps.mac_paths.outputs.out }}"
           Copy-Item msojocs-patch/server/file $out -Recurse -Force
-          $idx = Get-Content msojocs-patch/server/index.js -Raw
+          $idx = (Get-Content msojocs-patch/server/index.js -Raw).TrimStart()
           $idx = $idx -replace 'const port = \d+;', "const port = $env:PATCH_SERVER_PORT;"
-          Set-Content msojocs-patch/server/index.js $idx
           $jp = "$out/file/identity.getfiddler.com/oauth/token.json"
           $j = Get-Content $jp -Raw | ConvertFrom-Json
           $j.user_info.email = $env:PATCH_USER_EMAIL
@@ -437,10 +459,20 @@ jobs:
           $j | ConvertTo-Json -Depth 5 | Set-Content $jp
           Copy-Item "$out/main.js" "$out/main.original.js"
           $m = Get-Content "$out/main.js" -Raw
-          Set-Content "$out/main.js" ($idx + $m)
+          Set-Content -NoNewline "$out/main.js" ($idx + $m)
           if ($env:PATCH_LANGUAGE -like 'Yes*') {
             Copy-Item msojocs-patch/server/translate.js "$out/translate.js" -Force
           }
+
+      - name: Verify main.js injection (full mode)
+        if: contains(github.event.inputs.mac-patch-mode, 'full')
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="${{ steps.mac_paths.outputs.out }}/main.js"
+          grep -q "Fiddler-everywhere-enhance start" "$OUT"
+          grep -q "const port = ${PATCH_SERVER_PORT};" "$OUT"
+          echo "main.js injection OK (port ${PATCH_SERVER_PORT})"
 
       - name: Fix MacOS execute permission
         shell: bash
@@ -476,7 +508,7 @@ jobs:
           file "$EF" | grep -q "Mach-O" || { echo "Electron invalid after patch"; file "$EF"; exit 1; }
           echo "Electron OK after patch"
 
-      - name: Create zip (ditto)
+      - name: Prepare artifact (upload .app only — avoid zip-in-zip)
         id: pkg
         shell: bash
         run: |
@@ -484,25 +516,43 @@ jobs:
           VER="${{ env.VERSION_TO_PATCH }}"
           ARCH="arm64"
           [[ "${{ github.event.inputs.os-and-arch }}" == "Mac (x86_64)" ]] && ARCH="x64"
-          ZIP="FE-${VER}-mac-${ARCH}.zip"
-          rm -f "$ZIP"
-          ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
-          ls -lh "$ZIP"
-          echo "zip_file=$ZIP" >> "$GITHUB_OUTPUT"
+          STAGE="artifact-stage"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+          ditto "$APP" "$STAGE/Fiddler Everywhere.app"
+          ls -lh "$STAGE"
+          echo "artifact_path=$STAGE" >> "$GITHUB_OUTPUT"
           echo "artifact_name=FE-${VER}-mac-${ARCH}" >> "$GITHUB_OUTPUT"
 
       - name: Upload final artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.pkg.outputs.artifact_name }}
-          path: ${{ steps.pkg.outputs.zip_file }}
+          path: ${{ steps.pkg.outputs.artifact_path }}/
           compression-level: 9
           if-no-files-found: error
 
       - name: Install instructions
         run: |
-          Write-Host "Download: FE-$($env:VERSION_TO_PATCH)-mac-arm64"
-          Write-Host "Install: unzip -> ditto to /Applications -> xattr -cr -> open"
+          $arch = if ("${{ github.event.inputs.os-and-arch }}" -eq 'Mac (x86_64)') { 'x64' } else { 'arm64' }
+          Write-Host "=== Fiddler Everywhere $($env:VERSION_TO_PATCH) Mac ($arch) ==="
+          Write-Host "Docs: docs/fe-mac-773-patch.md"
+          Write-Host "Artifact: FE-$($env:VERSION_TO_PATCH)-mac-$arch"
+          Write-Host ""
+          Write-Host "Install (ditto only — do not cp -R or drag-drop):"
+          Write-Host "  pkill -9 'Fiddler Everywhere' 2>/dev/null; true"
+          Write-Host "  sudo rm -rf '/Applications/Fiddler Everywhere.app'"
+          Write-Host "  sudo ditto 'Fiddler Everywhere.app' '/Applications/Fiddler Everywhere.app'"
+          Write-Host "  xattr -d com.apple.quarantine '/Applications/Fiddler Everywhere.app' 2>/dev/null; true"
+          Write-Host "  open -a 'Fiddler Everywhere'"
+          Write-Host ""
+          Write-Host "Success: app launches; banner shows ~999 days trial (not 'expires today')."
+          Write-Host "Do NOT: xattr -cr on entire .app (macOS 26+). Do NOT use Yui continuous on Mac 7.7.x."
+          if ("${{ github.event.inputs.mac-patch-mode }}" -like '*dylib-only*') {
+            Write-Host "Mode: dylib-only — Yui v1.1.4 only; Trial banner expected. Re-run with mac-patch-mode=full."
+          } else {
+            Write-Host "Mode: full — Yui v1.1.4 libfiddler.dylib + msojocs main.js (port $($env:PATCH_SERVER_PORT))."
+          }
 
   patch_fe:
     needs:
