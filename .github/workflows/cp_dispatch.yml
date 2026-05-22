@@ -246,7 +246,9 @@ jobs:
           retention-days: 3
           if-no-files-found: error
 
-  # Mac: download DMG + patch in ONE job — avoids fe_app artifact breaking .framework symlinks
+  # Mac: build-patch-mac = 原 download-fiddler-everywhere-mac + patch_fe_mac 合并为同一 job。
+  # 原因：fe_app 经 upload/download artifact 会破坏 .framework 符号链接（Electron 变 ASCII 文本）。
+  # 顺序：下载 DMG → ditto 解压 → 校验 → 打补丁 → 打包（均在同一 runner 内完成）。
   build-patch-mac:
     needs:
       - validate-version
@@ -285,32 +287,85 @@ jobs:
           Invoke-WebRequest -Uri $url -OutFile FiddlerEverywhereSetup.dmg -UseBasicParsing
           if ((Get-Item FiddlerEverywhereSetup.dmg).Length -lt 1000000) { throw "DMG too small" }
 
-      - name: Extract Dmg
+      - name: Extract Dmg (ditto — preserves framework symlinks)
         shell: bash
         run: |
           set -euo pipefail
           xattr -dr com.apple.quarantine FiddlerEverywhereSetup.dmg 2>/dev/null || true
+          rm -rf fe_app
           mkdir -p fe_app
           MOUNT_DIR="/tmp/fe-dmg-mount-$$"
           mkdir -p "$MOUNT_DIR"
 
+          extract_with_ditto() {
+            local src_app="$1"
+            local name
+            name=$(basename "$src_app")
+            echo "ditto from: $src_app -> fe_app/$name"
+            ditto "$src_app" "fe_app/$name"
+          }
+
           if hdiutil attach -plist -nobrowse -noverify -noautofsck -noautoopen -mountpoint "$MOUNT_DIR" FiddlerEverywhereSetup.dmg; then
-            cp -R "$MOUNT_DIR"/*.app fe_app/
+            SRC_APP=$(find "$MOUNT_DIR" -maxdepth 1 -name "*.app" -type d | head -1)
+            if [ -z "$SRC_APP" ]; then echo "No .app on DMG volume"; exit 1; fi
+            extract_with_ditto "$SRC_APP"
             hdiutil detach "$MOUNT_DIR" -force
           else
+            echo "hdiutil failed, trying 7z..."
             rm -rf /tmp/fe-dmg-extract
             7z x FiddlerEverywhereSetup.dmg -o/tmp/fe-dmg-extract
-            APP=$(find /tmp/fe-dmg-extract -name "*.app" -type d | head -1)
-            cp -R "$APP" fe_app/
+            SRC_APP=$(find /tmp/fe-dmg-extract -name "*.app" -type d | head -1)
+            if [ -z "$SRC_APP" ]; then echo "No .app in 7z extract"; exit 1; fi
+            extract_with_ditto "$SRC_APP"
           fi
           ls -la fe_app/
+
+      - name: Repair framework symlinks
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP=$(find fe_app -name "*.app" -type d | head -1)
+          [ -n "$APP" ] || { echo "No .app in fe_app"; exit 1; }
+
+          repair_fw() {
+            local FW="$1"
+            [ -d "$FW" ] || return 0
+            local VER
+            if [ -L "$FW/Versions/Current" ] || [ -d "$FW/Versions/Current" ]; then
+              VER=$(basename "$(readlink "$FW/Versions/Current" 2>/dev/null || echo Current)")
+            elif [ -f "$FW/Versions/Current" ]; then
+              VER=$(tr -d '\n\r' < "$FW/Versions/Current")
+            else
+              VER=$(ls "$FW/Versions" 2>/dev/null | grep -vE '^Current$' | head -1)
+            fi
+            [ -n "$VER" ] && [ -d "$FW/Versions/$VER" ] || { echo "Cannot find version dir in $FW"; return 1; }
+            echo "Repair $FW -> Versions/$VER"
+            rm -f "$FW/Versions/Current"
+            ln -sf "$VER" "$FW/Versions/Current"
+            rm -f "$FW/Electron Framework" "$FW/Libraries" "$FW/Resources"
+            ln -sf "Versions/Current/Electron Framework" "$FW/Electron Framework"
+            [ -d "$FW/Versions/$VER/Libraries" ] && ln -sf "Versions/Current/Libraries" "$FW/Libraries"
+            [ -d "$FW/Versions/$VER/Resources" ] && ln -sf "Versions/Current/Resources" "$FW/Resources"
+          }
+
+          repair_fw "$APP/Contents/Frameworks/Electron Framework.framework"
+          echo "Framework layout:"
+          ls -la "$APP/Contents/Frameworks/Electron Framework.framework" || true
+          ls -la "$APP/Contents/Frameworks/Electron Framework.framework/Versions" || true
 
       - name: Verify Electron before patch
         shell: bash
         run: |
+          set -euo pipefail
           APP=$(find fe_app -name "*.app" -type d | head -1)
-          EF="$APP/Contents/Frameworks/Electron Framework.framework/Versions/Current/Electron Framework"
-          file "$EF" | grep -q "Mach-O" || { echo "Electron invalid before patch"; file "$EF"; exit 1; }
+          FW="$APP/Contents/Frameworks/Electron Framework.framework"
+          EF="$FW/Versions/Current/Electron Framework"
+          if [ ! -f "$EF" ]; then
+            VER=$(ls "$FW/Versions" | grep -vE '^Current$' | head -1)
+            EF="$FW/Versions/$VER/Electron Framework"
+          fi
+          echo "Checking: $EF"
+          file "$EF" | tee /dev/stderr | grep -q "Mach-O" || { echo "Electron invalid before patch"; exit 1; }
           echo "Electron OK before patch"
 
       - name: Resolve Mac app paths
@@ -410,8 +465,14 @@ jobs:
       - name: Verify Electron after patch
         shell: bash
         run: |
+          set -euo pipefail
           APP="${{ steps.mac_paths.outputs.app }}"
-          EF="$APP/Contents/Frameworks/Electron Framework.framework/Versions/Current/Electron Framework"
+          FW="$APP/Contents/Frameworks/Electron Framework.framework"
+          EF="$FW/Versions/Current/Electron Framework"
+          if [ ! -f "$EF" ]; then
+            VER=$(ls "$FW/Versions" | grep -vE '^Current$' | head -1)
+            EF="$FW/Versions/$VER/Electron Framework"
+          fi
           file "$EF" | grep -q "Mach-O" || { echo "Electron invalid after patch"; file "$EF"; exit 1; }
           echo "Electron OK after patch"
 
