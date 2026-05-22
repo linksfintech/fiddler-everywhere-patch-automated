@@ -459,7 +459,9 @@ jobs:
           $j | ConvertTo-Json -Depth 5 | Set-Content $jp
           Copy-Item "$out/main.js" "$out/main.original.js"
           $m = Get-Content "$out/main.js" -Raw
-          Set-Content -NoNewline "$out/main.js" ($idx + $m)
+          $mainJs = Join-Path $out 'main.js'
+          $utf8 = New-Object System.Text.UTF8Encoding $false
+          [System.IO.File]::WriteAllText($mainJs, $idx + $m, $utf8)
           if ($env:PATCH_LANGUAGE -like 'Yes*') {
             Copy-Item msojocs-patch/server/translate.js "$out/translate.js" -Force
           }
