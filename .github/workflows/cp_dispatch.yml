@@ -84,9 +84,10 @@ jobs:
     outputs:
       library_extension: ${{ steps.set_library_extension.outputs.library_extension }}
       arch_code: ${{ steps.set_arch.outputs.arch_code }}
+      mac_dylib_dest_name: ${{ steps.set_mac_dylib_dest.outputs.mac_dylib_dest_name }}
 
     steps:
-      - name: Set Library Extension (dll / so / dylib)
+      - name: Set Library Extension
         id: set_library_extension
         run: |
           $extension = switch ($env:OS_ARCH) {
@@ -110,6 +111,12 @@ jobs:
           }
           "arch_code=$arch" | Out-File -Append -FilePath $env:GITHUB_OUTPUT
 
+      - name: Set Mac install dylib name
+        id: set_mac_dylib_dest
+        run: |
+          # Mac 官方 7.x 使用 libfiddler.dylib（非 fiddler.dylib）
+          "mac_dylib_dest_name=libfiddler.dylib" | Out-File -Append -FilePath $env:GITHUB_OUTPUT
+
   download-Yui-patch:
     runs-on: ubuntu-latest
     needs: [validate-version, init_os_arch]
@@ -120,15 +127,16 @@ jobs:
       ARCH_CODE: ${{ needs.init_os_arch.outputs.arch_code }}
 
     outputs:
-      Yui-fiddler-name: ${{ steps.set_yui_name.outputs.Yui-fiddler-name }}
+      Yui-fiddler-name: ${{ steps.set_yui.outputs.Yui-fiddler-name }}
 
     steps:
-      - name: Set Yui variables
-        id: set_yui_name
+      - name: Set Yui download filename
+        id: set_yui
         run: |
           echo "YUI_NAME=yui" >> $env:GITHUB_ENV
           echo "Yui_RELEASE=continuous" >> $env:GITHUB_ENV
 
+          # Yui release 文件名规则
           if ([version]$env:VERSION_TO_PATCH -ge [version]"5.17.0" -and $env:OS_ARCH -ne 'Linux (x86_64)') {
             echo "Yui_FIDDLER_NAME=fiddler.$env:LIBRARY_EXTENSION" >> $env:GITHUB_ENV
             echo "Yui_FIDDLER_NAME_NO_EXTENSION=fiddler" >> $env:GITHUB_ENV
@@ -138,20 +146,28 @@ jobs:
           }
 
           echo "Yui-fiddler-name=$env:Yui_FIDDLER_NAME" >> $env:GITHUB_OUTPUT
+          Write-Host "Yui download file: $env:Yui_FIDDLER_NAME"
+          if ($env:OS_ARCH -match '^Mac ') {
+            Write-Host "Mac install target: libfiddler.dylib"
+          }
 
       - name: Download Yui Patch
         run: |
           New-Item -ItemType Directory -Path Yui -Force | Out-Null
           $url = "https://github.com/project-yui/Yui-patch/releases/download/$env:Yui_RELEASE/$env:YUI_NAME-$env:Yui_FIDDLER_NAME_NO_EXTENSION-$env:ARCH_CODE-$env:Yui_RELEASE.$env:LIBRARY_EXTENSION"
-          Write-Host "Yui URL: $url"
+          Write-Host "URL: $url"
           Invoke-WebRequest -Uri $url -OutFile "Yui\$env:Yui_FIDDLER_NAME" -UseBasicParsing
+          $item = Get-Item "Yui\$env:Yui_FIDDLER_NAME"
+          if ($item.PSIsContainer) { throw "Downloaded Yui patch is a directory, expected file" }
+          Write-Host "Downloaded $($item.Length) bytes"
 
-      - name: Upload Yui folder
+      - name: Upload Yui-patch
         uses: actions/upload-artifact@v4
         with:
           name: Yui-patch
           path: Yui/
           compression-level: 9
+          retention-days: 3
           if-no-files-found: error
 
   download-msojocs-server:
@@ -170,12 +186,13 @@ jobs:
           New-Item -ItemType Directory -Path msojocs -Force | Out-Null
           Move-Item -Path server -Destination msojocs/
 
-      - name: Upload msojocs
+      - name: Upload msojocs-patch
         uses: actions/upload-artifact@v4
         with:
           name: msojocs-patch
           path: msojocs/
           compression-level: 9
+          retention-days: 3
           if-no-files-found: error
 
   download-fiddler-everywhere-windows:
@@ -200,6 +217,7 @@ jobs:
           name: fe_app
           path: fe_app/
           compression-level: 9
+          retention-days: 3
           if-no-files-found: error
 
   download-fiddler-everywhere-linux:
@@ -225,6 +243,7 @@ jobs:
           name: fe_app
           path: fe_app/
           compression-level: 9
+          retention-days: 3
           if-no-files-found: error
 
   download-fiddler-everywhere-mac:
@@ -246,43 +265,52 @@ jobs:
             'Mac (arm64e)' { throw "Mac (arm64e) is not supported yet." }
             default { throw "Unsupported: $env:OS_ARCH" }
           }
-          Write-Host "Download URL: $url"
+          Write-Host "URL: $url"
           $ProgressPreference = 'SilentlyContinue'
           Invoke-WebRequest -Uri $url -OutFile FiddlerEverywhereSetup.dmg -UseBasicParsing
           $size = (Get-Item FiddlerEverywhereSetup.dmg).Length
-          Write-Host "Downloaded size: $size bytes"
-          if ($size -lt 1000000) { throw "DMG too small — check version or URL." }
+          Write-Host "DMG size: $size"
+          if ($size -lt 1000000) { throw "DMG too small" }
 
       - name: Extract Dmg
         shell: bash
         run: |
           set -euo pipefail
-          DMG="FiddlerEverywhereSetup.dmg"
-          file "$DMG"
-          xattr -dr com.apple.quarantine "$DMG" 2>/dev/null || true
+          xattr -dr com.apple.quarantine FiddlerEverywhereSetup.dmg 2>/dev/null || true
           mkdir -p fe_app
           MOUNT_DIR="/tmp/fe-dmg-mount-$$"
           mkdir -p "$MOUNT_DIR"
 
-          extract_via_hdiutil() {
-            hdiutil attach -plist -nobrowse -noverify -noautofsck -noautoopen -mountpoint "$MOUNT_DIR" "$DMG"
+          extract_hdiutil() {
+            hdiutil attach -plist -nobrowse -noverify -noautofsck -noautoopen -mountpoint "$MOUNT_DIR" FiddlerEverywhereSetup.dmg
             cp -R "$MOUNT_DIR"/*.app fe_app/
             hdiutil detach "$MOUNT_DIR" -force
           }
 
-          extract_via_7z() {
+          extract_7z() {
             rm -rf /tmp/fe-dmg-extract
-            7z x "$DMG" -o/tmp/fe-dmg-extract
+            7z x FiddlerEverywhereSetup.dmg -o/tmp/fe-dmg-extract
             APP=$(find /tmp/fe-dmg-extract -name "*.app" -type d | head -1)
-            [ -n "$APP" ] || return 1
+            [ -n "$APP" ]
             cp -R "$APP" fe_app/
           }
 
-          if extract_via_hdiutil; then echo "Extracted via hdiutil"
-          elif extract_via_7z; then echo "Extracted via 7z"
-          else echo "Both extract methods failed"; exit 1; fi
-
+          extract_hdiutil || extract_7z
           ls -la fe_app/
+
+      - name: Verify official Mac dylib name
+        shell: bash
+        run: |
+          APP=$(find fe_app -name "*.app" -type d | head -1)
+          FW="$APP/Contents/Frameworks"
+          echo "Frameworks:"
+          ls -la "$FW" | grep -i fiddler || true
+          if [ -f "$FW/libfiddler.dylib" ]; then
+            file "$FW/libfiddler.dylib"
+            echo "OK: official uses libfiddler.dylib"
+          else
+            echo "::warning::libfiddler.dylib not found in official extract"
+          fi
 
       - name: Upload fe_app
         uses: actions/upload-artifact@v4
@@ -290,6 +318,7 @@ jobs:
           name: fe_app
           path: fe_app/
           compression-level: 9
+          retention-days: 3
           if-no-files-found: error
 
   patch_fe:
@@ -324,46 +353,45 @@ jobs:
         run: |
           Rename-Item fe_app FE
           $fn = "${{ needs.download-Yui-patch.outputs.Yui-fiddler-name }}"
+          $yui = Join-Path "Yui-patch" $fn
           $dst = Get-ChildItem FE -Recurse -Filter $fn -File -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $dst) { throw "Target $fn not found under FE" }
-          Copy-Item "Yui-patch/$fn" $dst.FullName -Force
+          if (-not $dst) { throw "Target $fn not found" }
+          Copy-Item $yui $dst.FullName -Force
           Write-Host "Replaced $($dst.FullName)"
 
           Copy-Item msojocs-patch/server/file FE/resources/app/out -Recurse -Force
-
           $idx = Get-Content msojocs-patch/server/index.js -Raw
           $idx = $idx -replace 'const port = \d+;', "const port = $env:PATCH_SERVER_PORT;"
           Set-Content msojocs-patch/server/index.js $idx
 
-          $jsonPath = "FE/resources/app/out/file/identity.getfiddler.com/oauth/token.json"
-          $json = Get-Content $jsonPath -Raw | ConvertFrom-Json
-          $json.user_info.email = $env:PATCH_USER_EMAIL
-          $json.user_info.firstName = $env:PATCH_USER_FNAME
-          $json.user_info.lastName = $env:PATCH_USER_LNAME
-          $json.user_info.country = $env:PATCH_USER_COUNTRYCODE
-          $json.user_info.identities[0].providerName = $env:PATCH_USER_PROVIDER
-          $json | ConvertTo-Json -Depth 5 | Set-Content $jsonPath
+          $jp = "FE/resources/app/out/file/identity.getfiddler.com/oauth/token.json"
+          $j = Get-Content $jp -Raw | ConvertFrom-Json
+          $j.user_info.email = $env:PATCH_USER_EMAIL
+          $j.user_info.firstName = $env:PATCH_USER_FNAME
+          $j.user_info.lastName = $env:PATCH_USER_LNAME
+          $j.user_info.country = $env:PATCH_USER_COUNTRYCODE
+          $j.user_info.identities[0].providerName = $env:PATCH_USER_PROVIDER
+          $j | ConvertTo-Json -Depth 5 | Set-Content $jp
 
           Copy-Item FE/resources/app/out/main.js FE/resources/app/out/main.original.js
-          $main = Get-Content FE/resources/app/out/main.js -Raw
-          Set-Content FE/resources/app/out/main.js ($idx + $main)
+          $m = Get-Content FE/resources/app/out/main.js -Raw
+          Set-Content FE/resources/app/out/main.js ($idx + $m)
 
           if ($env:PATCH_LANGUAGE -like 'Yes*') {
             Copy-Item msojocs-patch/server/translate.js FE/resources/app/out/translate.js -Force
           }
 
-      - name: Create compressed zip
+      - name: Create zip
         id: pkg
         run: |
           $suffix = if ($env:OS_ARCH -eq 'Linux (x86_64)') { 'linux' } else { 'win' }
           $zip = "FE-$($env:VERSION_TO_PATCH)-$suffix.zip"
           Compress-Archive -Path FE -DestinationPath $zip -CompressionLevel Optimal -Force
-          $mb = [math]::Round((Get-Item $zip).Length / 1MB, 1)
-          Write-Host "ZIP size: $mb MB"
+          Write-Host "Size MB:" ([math]::Round((Get-Item $zip).Length/1MB,1))
           "zip_file=$zip" | Out-File -Append $env:GITHUB_OUTPUT
           "artifact_name=FE-$($env:VERSION_TO_PATCH)-$suffix" | Out-File -Append $env:GITHUB_OUTPUT
 
-      - name: Upload compressed artifact
+      - name: Upload final artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.pkg.outputs.artifact_name }}
@@ -388,6 +416,9 @@ jobs:
        github.event.inputs.os-and-arch == 'Mac (arm64e)')
     runs-on: macos-latest
 
+    env:
+      MAC_DYLIB_DEST: ${{ needs.init_os_arch.outputs.mac_dylib_dest_name }}
+
     steps:
       - uses: actions/download-artifact@v4
         with: { name: Yui-patch, path: Yui-patch }
@@ -401,50 +432,49 @@ jobs:
         run: |
           Rename-Item fe_app FE
           $app = Get-ChildItem FE -Filter "*.app" -Directory -Recurse | Select-Object -First 1
-          if (-not $app) { throw "No .app bundle found under FE" }
+          if (-not $app) { throw "No .app found" }
 
           $fw = Join-Path $app.FullName "Contents/Frameworks"
           $out = Join-Path $app.FullName "Contents/Resources/app/out"
-          if (-not (Test-Path $out)) { throw "Contents/Resources/app/out not found" }
+          $bin = Join-Path $app.FullName "Contents/MacOS/Fiddler Everywhere"
+
+          if (-not (Test-Path $out)) { throw "Missing Contents/Resources/app/out" }
+          if (-not (Test-Path $bin)) { throw "Missing MacOS/Fiddler Everywhere" }
 
           Write-Host "App: $($app.FullName)"
-          Write-Host "Frameworks: $fw"
-          if (Test-Path $fw) {
-            Get-ChildItem $fw -Recurse -File | Where-Object { $_.Name -match 'fiddler' } | ForEach-Object { $_.FullName }
+          Get-ChildItem $fw -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'fiddler' } | ForEach-Object {
+            Write-Host "Frameworks: $($_.Name) ($(if($_.PSIsContainer){'dir'}else{'file'}))"
           }
 
           "app=$($app.FullName)" | Out-File -Append $env:GITHUB_OUTPUT
           "fw=$fw" | Out-File -Append $env:GITHUB_OUTPUT
           "out=$out" | Out-File -Append $env:GITHUB_OUTPUT
+          "bin=$bin" | Out-File -Append $env:GITHUB_OUTPUT
 
-      - name: Patch fiddler.dylib in Contents/Frameworks
+      - name: Patch libfiddler.dylib (Mac official name)
         run: |
           $fw = "${{ steps.mac_paths.outputs.fw }}"
-          $yui = Join-Path "Yui-patch" "${{ needs.download-Yui-patch.outputs.Yui-fiddler-name }}"
-          if (-not (Test-Path $yui)) { throw "Yui patch not found: $yui" }
-          if (-not (Test-Path $fw)) { New-Item -ItemType Directory -Path $fw -Force | Out-Null }
+          $destName = $env:MAC_DYLIB_DEST   # libfiddler.dylib
+          $yuiFile = Join-Path "Yui-patch" "${{ needs.download-Yui-patch.outputs.Yui-fiddler-name }}"
 
-          $destNames = if ([version]$env:VERSION_TO_PATCH -ge [version]"5.17.0") {
-            @("fiddler.dylib", "libfiddler.dylib")
-          } else {
-            @("libfiddler.dylib", "fiddler.dylib")
+          if (-not (Test-Path $yuiFile)) { throw "Yui not found: $yuiFile" }
+          if ((Get-Item $yuiFile).PSIsContainer) { throw "Yui must be file: $yuiFile" }
+
+          foreach ($n in @("fiddler.dylib", "libfiddler.dylib")) {
+            $p = Join-Path $fw $n
+            if (Test-Path $p) {
+              Remove-Item $p -Recurse -Force
+              Write-Host "Removed: $p"
+            }
           }
 
-          foreach ($n in $destNames) {
-            Remove-Item (Join-Path $fw $n) -Force -ErrorAction SilentlyContinue
-          }
+          $destPath = Join-Path $fw $destName
+          Copy-Item -Path $yuiFile -Destination $destPath -Force
 
-          $target = Get-ChildItem $fw -Recurse -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -in $destNames } | Select-Object -First 1
-
-          if ($target) {
-            Copy-Item $yui $target.FullName -Force
-            Write-Host "Replaced $($target.FullName)"
-          } else {
-            $destPath = Join-Path $fw $destNames[0]
-            Copy-Item $yui $destPath -Force
-            Write-Host "Installed to $destPath"
-          }
+          $item = Get-Item $destPath
+          if ($item.PSIsContainer) { throw "$destPath is directory" }
+          Write-Host "Installed $($item.Length) bytes -> $destPath"
+          file $destPath 2>$null; if (-not $?) { Get-Item $destPath | Format-List }
 
       - name: Patch app/out
         run: |
@@ -455,52 +485,54 @@ jobs:
           $idx = $idx -replace 'const port = \d+;', "const port = $env:PATCH_SERVER_PORT;"
           Set-Content msojocs-patch/server/index.js $idx
 
-          $jsonPath = "$out/file/identity.getfiddler.com/oauth/token.json"
-          $json = Get-Content $jsonPath -Raw | ConvertFrom-Json
-          $json.user_info.email = $env:PATCH_USER_EMAIL
-          $json.user_info.firstName = $env:PATCH_USER_FNAME
-          $json.user_info.lastName = $env:PATCH_USER_LNAME
-          $json.user_info.country = $env:PATCH_USER_COUNTRYCODE
-          $json.user_info.identities[0].providerName = $env:PATCH_USER_PROVIDER
-          $json | ConvertTo-Json -Depth 5 | Set-Content $jsonPath
+          $jp = "$out/file/identity.getfiddler.com/oauth/token.json"
+          $j = Get-Content $jp -Raw | ConvertFrom-Json
+          $j.user_info.email = $env:PATCH_USER_EMAIL
+          $j.user_info.firstName = $env:PATCH_USER_FNAME
+          $j.user_info.lastName = $env:PATCH_USER_LNAME
+          $j.user_info.country = $env:PATCH_USER_COUNTRYCODE
+          $j.user_info.identities[0].providerName = $env:PATCH_USER_PROVIDER
+          $j | ConvertTo-Json -Depth 5 | Set-Content $jp
 
           Copy-Item "$out/main.js" "$out/main.original.js"
-          $main = Get-Content "$out/main.js" -Raw
-          Set-Content "$out/main.js" ($idx + $main)
+          $m = Get-Content "$out/main.js" -Raw
+          Set-Content "$out/main.js" ($idx + $m)
 
           if ($env:PATCH_LANGUAGE -like 'Yes*') {
             Copy-Item msojocs-patch/server/translate.js "$out/translate.js" -Force
           }
+
+      - name: Fix MacOS execute permission
+        shell: bash
+        run: |
+          chmod +x "${{ steps.mac_paths.outputs.bin }}"
+          chmod -R +x "$(dirname "${{ steps.mac_paths.outputs.bin }}")"
 
       - name: Re-sign app bundle
         shell: bash
         run: |
           set +e
           APP="${{ steps.mac_paths.outputs.app }}"
-          FW="${{ steps.mac_paths.outputs.fw }}"
+          DYLIB="$APP/Contents/Frameworks/libfiddler.dylib"
 
-          for name in fiddler.dylib libfiddler.dylib; do
-            f="$FW/$name"
-            if [ -f "$f" ]; then
-              codesign -s "-" -f "$f" "$f" 2>&1 && echo "OK: $f" || echo "WARN: $f"
-            fi
-          done
-
-          find "$FW" -type f -name "*.dylib" 2>/dev/null | while read -r f; do
-            codesign -s "-" -f "$f" "$f" 2>&1 || echo "WARN: $f"
-          done
-
-          codesign -s "-" -f "$APP/Contents/MacOS/"* 2>&1 || echo "WARN: MacOS binary"
-          codesign -s "-" --force --timestamp=none "$APP" 2>&1
-          if [ $? -ne 0 ]; then
-            echo "::warning::CI codesign failed. After install run:"
-            echo "sudo codesign -s \"-\" --deep --force \"/Applications/Fiddler Everywhere.app\""
-          else
-            echo "codesign OK"
+          if [ -f "$DYLIB" ]; then
+            codesign --remove-signature "$DYLIB" 2>/dev/null || true
+            codesign -s "-" -f "$DYLIB" && echo "OK: libfiddler.dylib" || echo "WARN: libfiddler.dylib"
           fi
+
+          codesign -s "-" -f "$APP/Contents/MacOS/Fiddler Everywhere" && echo "OK: main binary" || echo "WARN: main"
+          codesign -s "-" --force --timestamp=none "$APP" && echo "OK: app" || echo "WARN: app"
           exit 0
 
-      - name: Create compressed zip (app only)
+      - name: Verify Electron Framework
+        shell: bash
+        run: |
+          APP="${{ steps.mac_paths.outputs.app }}"
+          EF="$APP/Contents/Frameworks/Electron Framework.framework/Electron Framework"
+          file "$EF" | tee /dev/stderr | grep -q "Mach-O" || { echo "Invalid Electron Framework"; exit 1; }
+          echo "Electron Framework OK"
+
+      - name: Create zip (app only, ditto)
         id: pkg
         shell: bash
         run: |
@@ -509,12 +541,13 @@ jobs:
           ARCH="arm64"
           [[ "${{ github.event.inputs.os-and-arch }}" == "Mac (x86_64)" ]] && ARCH="x64"
           ZIP="FE-${VER}-mac-${ARCH}.zip"
+          rm -f "$ZIP"
           ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
           ls -lh "$ZIP"
           echo "zip_file=$ZIP" >> "$GITHUB_OUTPUT"
           echo "artifact_name=FE-${VER}-mac-${ARCH}" >> "$GITHUB_OUTPUT"
 
-      - name: Upload compressed artifact
+      - name: Upload final artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.pkg.outputs.artifact_name }}
@@ -522,9 +555,15 @@ jobs:
           compression-level: 9
           if-no-files-found: error
 
-      - name: Print download hint
+      - name: Install instructions
         run: |
-          Write-Host "=========================================="
-          Write-Host "Download artifact: FE-$($env:VERSION_TO_PATCH)-mac-arm64"
-          Write-Host "Only available after download-fiddler-everywhere-mac succeeds."
-          Write-Host "=========================================="
+          Write-Host "=============================================="
+          Write-Host "Download ONLY: FE-$($env:VERSION_TO_PATCH)-mac-arm64"
+          Write-Host "Install (on Mac):"
+          Write-Host "  unzip FE-$($env:VERSION_TO_PATCH)-mac-arm64.zip"
+          Write-Host "  sudo rm -rf '/Applications/Fiddler Everywhere.app'"
+          Write-Host "  ditto 'Fiddler Everywhere.app' '/Applications/Fiddler Everywhere.app'"
+          Write-Host "  sudo xattr -cr '/Applications/Fiddler Everywhere.app'"
+          Write-Host "  open -a 'Fiddler Everywhere'"
+          Write-Host "Do NOT use cp -R. Do NOT create fiddler.dylib."
+          Write-Host "=============================================="
